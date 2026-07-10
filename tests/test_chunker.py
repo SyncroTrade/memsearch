@@ -1,6 +1,6 @@
 """Tests for the markdown chunker."""
 
-from memsearch.chunker import chunk_markdown, clean_content_for_embedding
+from memsearch.chunker import _clamp_heading, chunk_markdown, clean_content_for_embedding
 
 
 def test_simple_heading_split():
@@ -251,3 +251,42 @@ def test_long_cjk_text_splits_on_fullwidth_semicolon() -> None:
     assert len(chunks) > 1
     assert all(len(chunk.content) <= 24 for chunk in chunks)
     assert all(chunk.content.endswith(semicolon) for chunk in chunks[:-1])
+
+
+def test_clamp_heading_noop_under_limit() -> None:
+    assert _clamp_heading("Short heading") == "Short heading"
+
+
+def test_clamp_heading_truncates_over_limit() -> None:
+    heading = "x" * 2000
+    clamped = _clamp_heading(heading)
+    assert len(clamped.encode("utf-8")) <= 512
+    assert clamped == "x" * 512
+
+
+def test_clamp_heading_is_utf8_byte_safe() -> None:
+    """A multi-byte character straddling the truncation boundary must not
+    be split into an invalid partial sequence."""
+    # U+4E2D ("中") is 3 bytes in UTF-8; repeating it means every truncation
+    # boundary at a non-multiple-of-3 byte offset would land mid-character
+    # if truncation were naive.
+    heading = "中" * 1000
+    clamped = _clamp_heading(heading, max_bytes=511)  # not a multiple of 3
+    encoded = clamped.encode("utf-8")
+    assert len(encoded) <= 511
+    # Round-trips cleanly — no stray replacement/partial bytes.
+    assert encoded.decode("utf-8") == clamped
+
+
+def test_over_length_heading_with_body_is_clamped_not_dropped() -> None:
+    """Regression for the VARCHAR(1024) heading rejection: a single-line
+    heading far past the store's max_length, followed by real body text,
+    must still produce chunks with a clamped (not rejected) heading, and
+    the body text must not be lost."""
+    heading_text = "A" * 1800
+    md = f"# {heading_text}\n\nReal body content that makes this chunk meaningful.\n"
+    chunks = chunk_markdown(md, source="test.md")
+    assert len(chunks) >= 1
+    assert all(len(c.heading.encode("utf-8")) <= 512 for c in chunks)
+    assert any(c.heading == "A" * 512 for c in chunks)
+    assert any("Real body content" in c.content for c in chunks)
