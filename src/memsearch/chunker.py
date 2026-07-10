@@ -13,6 +13,33 @@ _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 # Chunks with less useful text than this are dropped during chunking.
 _MIN_MEANINGFUL_LEN = 2
 
+# Hard cap on stored heading length. Keeps headings well under the
+# MilvusStore VARCHAR(1024) schema limit for the `heading` field
+# (see store.py) with headroom for future schema changes, and headings
+# past this length have no retrieval value anyway.
+_MAX_HEADING_BYTES = 512
+
+
+def _clamp_heading(text: str, max_bytes: int = _MAX_HEADING_BYTES) -> str:
+    """Truncate *text* to at most *max_bytes* UTF-8 bytes, without splitting
+    a multi-byte character.
+
+    A markdown heading line has no length limit, but the chunk store does
+    (VARCHAR(1024) on `heading` — see store.py). An over-length heading with
+    body text previously caused the whole file's chunks to be rejected by
+    the store *after* its stale chunks had already been deleted, silently
+    dropping the file from the index. Clamping at chunk-construction time —
+    once, at the source of the heading string — keeps every downstream
+    ``Chunk(heading=...)`` construction safe without touching the store
+    schema.
+    """
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    # errors="ignore" drops any partial multi-byte sequence left dangling
+    # at the truncation boundary.
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
 
 def clean_content_for_embedding(text: str) -> str:
     """Strip metadata noise from chunk content before embedding.
@@ -96,7 +123,7 @@ def chunk_markdown(
     for i, line in enumerate(lines):
         m = _HEADING_RE.match(line)
         if m:
-            heading_positions.append((i, len(m.group(1)), m.group(2).strip()))
+            heading_positions.append((i, len(m.group(1)), _clamp_heading(m.group(2).strip())))
 
     # Build sections between headings
     sections: list[tuple[int, int, str, int]] = []  # (start, end, heading, level)
