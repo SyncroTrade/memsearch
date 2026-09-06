@@ -186,6 +186,65 @@ def test_drop(store: MilvusStore):
     assert len(results) == 0
 
 
+def test_rows_by_hashes_returns_full_rows_with_vector(store: MilvusStore):
+    chunks = [
+        {
+            "embedding": [1.0, 0.0, 0.0, 0.0],
+            "content": "Hello world",
+            "source": "test.md",
+            "heading": "Intro",
+            "chunk_hash": "h1",
+            "heading_level": 1,
+            "start_line": 1,
+            "end_line": 5,
+        },
+        {
+            "embedding": [0.0, 1.0, 0.0, 0.0],
+            "content": "Goodbye world",
+            "source": "test.md",
+            "heading": "Outro",
+            "chunk_hash": "h2",
+            "heading_level": 1,
+            "start_line": 6,
+            "end_line": 10,
+        },
+    ]
+    store.upsert(chunks)
+
+    rows = store.rows_by_hashes(["h1"])
+    assert len(rows) == 1
+    assert rows[0]["chunk_hash"] == "h1"
+    assert rows[0]["embedding"] == pytest.approx([1.0, 0.0, 0.0, 0.0])
+    assert rows[0]["content"] == "Hello world"
+    assert rows[0]["source"] == "test.md"
+    assert rows[0]["start_line"] == 1
+    assert rows[0]["end_line"] == 5
+
+
+def test_rows_by_hashes_batches_large_id_lists(store: MilvusStore):
+    chunks = [
+        {
+            "embedding": [1.0, 0.0, 0.0, 0.0],
+            "content": f"chunk {i}",
+            "source": "many.md",
+            "heading": "",
+            "chunk_hash": f"h{i}",
+            "heading_level": 0,
+            "start_line": i,
+            "end_line": i,
+        }
+        for i in range(5)
+    ]
+    store.upsert(chunks)
+
+    rows = store.rows_by_hashes([f"h{i}" for i in range(5)], batch_size=2)
+    assert {r["chunk_hash"] for r in rows} == {f"h{i}" for i in range(5)}
+
+
+def test_rows_by_hashes_empty_input(store: MilvusStore):
+    assert store.rows_by_hashes([]) == []
+
+
 def test_collection_description(tmp_path: Path):
     """Collection should store the description when provided."""
     db = str(tmp_path / "desc_test.db")

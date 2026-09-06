@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .watcher import FileWatcher
 
-from .chunker import Chunk, chunk_markdown, clean_content_for_embedding, compute_chunk_id
+from .chunker import Chunk, chunk_markdown, clean_content_for_embedding, compute_chunk_id, compute_content_hash
 from .compact import compact_chunks
 from .embeddings import EmbeddingProvider, get_provider
 from .io import read_utf8_text_replace
@@ -80,6 +80,10 @@ class MemSearch:
             description=description,
         )
         self._reranker_model = reranker_model
+        # Split of the last index()/index_file() call's chunk count between
+        # freshly embedded chunks and chunks re-keyed from an unchanged
+        # donor row's vector (#704). Reset at the start of each call.
+        self.last_index_stats: dict[str, int] = {"embedded": 0, "rekeyed": 0}
 
     # ------------------------------------------------------------------
     # Indexing
@@ -95,6 +99,7 @@ class MemSearch:
         total = 0
         failed = 0
         active_sources: set[str] = set()
+        self.last_index_stats = {"embedded": 0, "rekeyed": 0}
         for f in files:
             active_sources.add(str(f.path))
             try:
@@ -126,6 +131,7 @@ class MemSearch:
         p = Path(path).expanduser().resolve()
         _st = p.stat()
         sf = ScannedFile(path=p, mtime=_st.st_mtime, size=_st.st_size)
+        self.last_index_stats = {"embedded": 0, "rekeyed": 0}
         return await self._index_file(sf)
 
     async def _index_file(self, f: ScannedFile, *, force: bool = False) -> int:
@@ -145,10 +151,23 @@ class MemSearch:
 
         # Delete stale chunks that are no longer in the file
         stale = old_ids - chunk_ids
+
+        # Before the stale rows are deleted, see whether any of them can
+        # donate their embedding vector to a new chunk with byte-identical
+        # content that merely moved to a different line range (#704) --
+        # e.g. inserting one section shifts every chunk below it, which
+        # otherwise re-embeds ~all of them for zero semantic change.
+        # force=True always re-embeds everything, so donors are never
+        # collected (and never consulted) on that path.
+        donors: dict[str, dict[str, Any]] = {}
+        if stale and not force:
+            donors = self._rekey_donors(stale, model)
+
         if stale:
             self._store.delete_by_hashes(list(stale))
 
         if not chunks:
+            self._add_index_stats(0, 0)
             return 0
 
         if not force:
@@ -159,9 +178,55 @@ class MemSearch:
                 if compute_chunk_id(c.source, c.start_line, c.end_line, c.content_hash, model) not in old_ids
             ]
             if not chunks:
+                self._add_index_stats(0, 0)
                 return 0
 
-        return await self._embed_and_store(chunks)
+            to_embed: list[Chunk] = []
+            rekey_records: list[dict[str, Any]] = []
+            for c in chunks:
+                donor = donors.get(c.content_hash)
+                if donor is None:
+                    to_embed.append(c)
+                else:
+                    rekey_records.append(_records_for_chunks([c], [donor["embedding"]], model)[0])
+
+            rekeyed = self._store.upsert(rekey_records) if rekey_records else 0
+            if rekeyed:
+                logger.info(
+                    "Re-keyed %d unchanged chunk(s) for %s (vectors copied, not re-embedded)",
+                    rekeyed,
+                    source,
+                )
+            embedded = await self._embed_and_store(to_embed) if to_embed else 0
+            self._add_index_stats(embedded, rekeyed)
+            return embedded + rekeyed
+
+        embedded = await self._embed_and_store(chunks)
+        self._add_index_stats(embedded, 0)
+        return embedded
+
+    def _rekey_donors(self, stale_hashes: set[str], model: str) -> dict[str, dict[str, Any]]:
+        """Find stale rows safe to reuse as re-key donors, keyed by content_hash.
+
+        A row is a donor only if recomputing its composite id from its
+        stored (source, start_line, end_line, content) under the CURRENT
+        model reproduces its stored chunk_hash exactly. That equality
+        proves the stored vector was produced by this exact model for
+        this exact content -- a row minted under a different model name
+        (or a hand-edited/corrupt row) fails the check and is embedded
+        normally instead.
+        """
+        donors: dict[str, dict[str, Any]] = {}
+        for row in self._store.rows_by_hashes(list(stale_hashes)):
+            content_hash = compute_content_hash(row["content"])
+            expected_id = compute_chunk_id(row["source"], row["start_line"], row["end_line"], content_hash, model)
+            if expected_id == row["chunk_hash"]:
+                donors[content_hash] = row
+        return donors
+
+    def _add_index_stats(self, embedded: int, rekeyed: int) -> None:
+        self.last_index_stats["embedded"] += embedded
+        self.last_index_stats["rekeyed"] += rekeyed
 
     async def _embed_and_store(self, chunks: list[Chunk]) -> int:
         if not chunks:

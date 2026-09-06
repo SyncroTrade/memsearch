@@ -85,8 +85,21 @@ class Chunk:
 
     def __post_init__(self) -> None:
         if not self.content_hash:
-            h = hashlib.sha256(self.content.encode()).hexdigest()[:16]
-            object.__setattr__(self, "content_hash", h)
+            object.__setattr__(self, "content_hash", compute_content_hash(self.content))
+
+
+def compute_content_hash(content: str) -> str:
+    """Compute the content hash embedded in a chunk's composite id.
+
+    A pure function of *content* alone -- it does not depend on source,
+    line range, heading, or model. That purity is what makes re-keying
+    possible: a chunk whose text is untouched keeps the same
+    content_hash even after an earlier insertion shifts its line range
+    (see #704). Kept in sync with ``Chunk.__post_init__`` below so
+    callers that only have a stored ``content`` string (no ``Chunk``
+    instance) can recompute the same hash.
+    """
+    return hashlib.sha256(content.encode()).hexdigest()[:16]
 
 
 def compute_chunk_id(

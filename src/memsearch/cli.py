@@ -211,6 +211,9 @@ def index(
         ms = MemSearch(list(paths), **_cfg_to_memsearch_kwargs(cfg), description=description or "")
         n = _run(ms.index(force=force))
         click.echo(f"Indexed {n} chunks.")
+        rekeyed = ms.last_index_stats.get("rekeyed", 0)
+        if rekeyed > 0:
+            click.echo(f"Re-keyed {rekeyed} unchanged chunks (vectors copied, not re-embedded).")
     except MilvusException as e:
         click.echo(f"Milvus error (code {e.code}): {e.message}", err=True)
         raise SystemExit(1) from None

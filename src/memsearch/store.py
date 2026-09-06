@@ -238,6 +238,49 @@ class MilvusStore:
         )
         return {r["chunk_hash"] for r in results}
 
+    _REKEY_FIELDS: ClassVar[list[str]] = [
+        "chunk_hash",
+        "embedding",
+        "content",
+        "source",
+        "start_line",
+        "end_line",
+    ]
+
+    def rows_by_hashes(self, hashes: list[str], *, batch_size: int = 500) -> list[dict[str, Any]]:
+        """Fetch full rows (including the dense vector) for the given chunk_hash ids.
+
+        Used to recover donor vectors for the re-key path (#704): a chunk
+        whose line range shifted but whose content did not can reuse a
+        stale row's embedding instead of paying for a fresh embed call.
+
+        The ``chunk_hash in [...]`` filter is batched at *batch_size* ids
+        per query. pymilvus caps query/search pagination at
+        ``MAX_BATCH_SIZE`` (16384 as of pymilvus 3.0.1, see
+        ``pymilvus.client.constants``) and Milvus Lite shares the same
+        client-side limit -- there is no separate documented cap on the
+        number of elements inside an ``in [...]`` list, but a very large
+        IN-list still produces one long filter expression sent in a
+        single gRPC request. 500 keeps that expression small (~10KB for
+        16-hex-char ids) and each query well inside default gRPC message
+        limits, while still cutting round trips by orders of magnitude
+        versus one id per query.
+        """
+        if not hashes:
+            return []
+        rows: list[dict[str, Any]] = []
+        for i in range(0, len(hashes), batch_size):
+            batch = hashes[i : i + batch_size]
+            quoted = ", ".join(f'"{_escape_filter_value(h)}"' for h in batch)
+            rows.extend(
+                self._client.query(
+                    collection_name=self._collection,
+                    filter=f"chunk_hash in [{quoted}]",
+                    output_fields=self._REKEY_FIELDS,
+                )
+            )
+        return rows
+
     def indexed_sources(self) -> set[str]:
         """Return all distinct source values in the collection."""
         results = self._client.query(
