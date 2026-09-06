@@ -125,6 +125,8 @@ def test_cli_index_records_ok_state(monkeypatch, tmp_path: Path) -> None:
     memory_dir.mkdir(parents=True)
 
     class FakeMemSearch:
+        last_index_stats: dict[str, int] = {}
+
         def __init__(self, paths, **kwargs):
             assert paths == [str(memory_dir)]
             assert kwargs["collection"] == "memsearch_chunks"
@@ -158,6 +160,8 @@ def test_cli_index_combines_configured_and_one_off_ignore_rules(monkeypatch, tmp
     captured: dict = {}
 
     class FakeMemSearch:
+        last_index_stats: dict[str, int] = {}
+
         def __init__(self, paths, **kwargs):
             captured["paths"] = paths
             captured["kwargs"] = kwargs
@@ -196,6 +200,8 @@ def test_cli_index_records_degraded_state(monkeypatch, tmp_path: Path) -> None:
     memory_dir.mkdir(parents=True)
 
     class FakeMemSearch:
+        last_index_stats: dict[str, int] = {}
+
         def __init__(self, *_args, **_kwargs):
             pass
 
@@ -227,6 +233,8 @@ def test_cli_index_records_error_state(monkeypatch, tmp_path: Path) -> None:
     memory_dir.mkdir(parents=True)
 
     class FakeMemSearch:
+        last_index_stats: dict[str, int] = {}
+
         def __init__(self, *_args, **_kwargs):
             pass
 
@@ -257,6 +265,8 @@ def test_cli_watch_records_event_error_state(monkeypatch, tmp_path: Path) -> Non
             pass
 
     class FakeMemSearch:
+        last_index_stats: dict[str, int] = {}
+
         def __init__(self, *_args, **_kwargs):
             pass
 

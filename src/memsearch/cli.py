@@ -311,6 +311,9 @@ def index(
             milvus_uri=cfg.milvus.uri,
         )
         click.echo(f"Indexed {report.indexed_chunks} chunks.")
+        rekeyed = ms.last_index_stats.get("rekeyed", 0)
+        if rekeyed > 0:
+            click.echo(f"Re-keyed {rekeyed} unchanged chunks (vectors copied, not re-embedded).")
     except MilvusException as e:
         record_index_error(
             state_path,
