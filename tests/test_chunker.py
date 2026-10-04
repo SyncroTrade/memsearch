@@ -1,5 +1,8 @@
 """Tests for the markdown chunker."""
 
+import random
+from itertools import pairwise
+
 from memsearch.chunker import _clamp_heading, chunk_markdown, clean_content_for_embedding
 
 
@@ -290,3 +293,86 @@ def test_over_length_heading_with_body_is_clamped_not_dropped() -> None:
     assert all(len(c.heading.encode("utf-8")) <= 512 for c in chunks)
     assert any(c.heading == "A" * 512 for c in chunks)
     assert any("Real body content" in c.content for c in chunks)
+
+
+def _line(tag: str, length: int) -> str:
+    """A synthetic source line of exactly *length* characters (at least 8),
+    unique per *tag*, with no leading or trailing whitespace."""
+    return (tag + " ").ljust(length - 1, "x") + "."
+
+
+def _assert_whole_source_lines(md: str, chunks, max_size: int = 1500) -> None:
+    """Every chunk is a run of whole, consecutive source lines within the cap."""
+    src = md.split("\n")
+    for c in chunks:
+        assert len(c.content) <= max_size
+        # The stored range reproduces the content exactly.
+        assert "\n".join(src[c.start_line - 1 : c.end_line]).strip() == c.content
+        body = c.content.split("\n")
+        # First and last line are whole source lines, not fragments of one.
+        assert body[0] in src
+        assert body[-1] in src
+    # Nothing is lost: every body line sits in some chunk (a heading with no
+    # body of its own is dropped by design).
+    covered = {ln for c in chunks for ln in c.content.split("\n")}
+    assert all(ln in covered for ln in src if ln.strip() and not ln.startswith("#"))
+
+
+def test_overlap_carry_never_pushes_chunk_past_cap() -> None:
+    """Carried overlap lines used to be re-added in front of the next line
+    without checking the sum, so the chunk went over the cap and was cut in
+    the middle of a source line. Carry must shrink instead."""
+    lines = [_line("a", 434), _line("b", 729), _line("c", 507), _line("d", 518)]
+    md = "# Title\n" + "\n".join(lines)
+    chunks = chunk_markdown(md, source="test.md")
+    assert len(chunks) > 1
+    _assert_whole_source_lines(md, chunks)
+    # Every chunk that holds source lines ends on a whole one: no fragment.
+    assert all(c.content.split("\n")[-1] in [*lines, "# Title"] for c in chunks)
+
+
+def test_carry_after_paragraph_split_is_dropped_when_next_line_is_long() -> None:
+    """A paragraph split carries its last lines before it knows the next line.
+    When carry plus that line would reach the cap, the carry is shed up front,
+    so the carried line is not emitted again as a chunk of its own."""
+    a, b, c, d = _line("a", 700), _line("b", 794), _line("c", 900), _line("d", 100)
+    md = f"# T\n{a}\n{b}\n\n{c}\n{d}"
+    chunks = chunk_markdown(md, source="test.md")
+    _assert_whole_source_lines(md, chunks)
+    assert [ch.content for ch in chunks] == [f"# T\n{a}\n{b}", f"{c}\n{d}"]
+    # The range starts at the blank line kept from the carry; strip hides it.
+    assert chunks[1].start_line == 4
+
+
+def test_chunks_are_whole_source_lines_on_random_documents() -> None:
+    rng = random.Random(956)
+    for _ in range(300):
+        src: list[str] = []
+        for n in range(rng.randint(5, 40)):
+            kind = rng.random()
+            if kind < 0.15:
+                src.append("")
+            elif kind < 0.2:
+                src.append(f"## H{n}")
+            else:
+                src.append(_line(f"L{n}", rng.randint(8, 1499)))
+        md = "\n".join(src)
+        _assert_whole_source_lines(md, chunk_markdown(md, source="test.md"))
+
+
+def test_single_line_over_cap_is_still_split() -> None:
+    long_line = ("word " * 400).strip()
+    md = f"# Title\n{_line('a', 300)}\n{long_line}\n{_line('b', 300)}"
+    chunks = chunk_markdown(md, source="test.md")
+    assert len(long_line) > 1500
+    assert all(len(c.content) <= 1500 for c in chunks)
+    assert any(c.content.startswith("word") for c in chunks)
+    assert sum(c.content.count("word") for c in chunks) >= 400
+
+
+def test_overlap_lines_shared_between_consecutive_chunks() -> None:
+    src = [_line(f"n{n:03d}", 100) for n in range(60)]
+    chunks = chunk_markdown("\n".join(src), source="test.md", overlap_lines=2)
+    assert len(chunks) > 2
+    for prev, nxt in pairwise(chunks):
+        assert prev.content.split("\n")[-2:] == nxt.content.split("\n")[:2]

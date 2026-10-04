@@ -195,10 +195,19 @@ def _split_large_section(
     """Split a large section into smaller chunks.
 
     Split priority: paragraph boundary > line boundary > sentence/char boundary.
+
+    The last *overlap* lines of each emitted chunk are carried into the next
+    one as context. Carried lines are never payload: when carry plus the next
+    source line would reach *max_size*, carried lines are dropped from the
+    front (all of them if need be) so a chunk is never pushed over the cap and
+    cut mid-line. Every chunk is therefore a run of whole, consecutive source
+    lines, unless a single source line is itself over *max_size*.
     """
     chunks: list[Chunk] = []
     current_lines: list[str] = []
     current_start = 0
+    # True while current_lines holds only lines carried over a paragraph split.
+    carry_only = False
 
     def _emit(content: str, start_line: int, end_line: int) -> None:
         if content:
@@ -224,6 +233,13 @@ def _split_large_section(
             _emit(content, start_line, end_line)
 
     for i, line in enumerate(lines):
+        if carry_only:
+            # The paragraph path carries lines before it knows the next one;
+            # drop carry that would push this line's chunk to the cap.
+            while current_lines and len("\n".join([*current_lines, line])) >= max_size:
+                current_lines.pop(0)
+                current_start += 1
+            carry_only = False
         current_lines.append(line)
         text = "\n".join(current_lines)
 
@@ -236,6 +252,7 @@ def _split_large_section(
             overlap_start = max(0, len(current_lines) - overlap)
             current_lines = current_lines[overlap_start:]
             current_start = i + 1 - len(current_lines)
+            carry_only = True
             continue
 
         # Forced line-boundary split: no paragraph break found but text is
@@ -247,6 +264,10 @@ def _split_large_section(
             _emit_bounded(content, base_line + current_start + 1, base_line + i)
             overlap_start = max(0, len(current_lines) - overlap)
             current_lines = current_lines[overlap_start:]
+            # Overlap is context, never payload: shed carry that would
+            # push the re-added line's chunk to the cap.
+            while current_lines and len("\n".join([*current_lines, line])) >= max_size:
+                current_lines.pop(0)
             current_lines.append(line)  # re-add the rolled-back line
             current_start = i - len(current_lines) + 1
             continue
