@@ -1,6 +1,7 @@
 """Tests for the opt-in ``mode="block"`` chunker."""
 
 import random
+import re
 
 import pytest
 
@@ -257,10 +258,13 @@ def test_a_comment_cut_loose_by_the_cap_merges_back_when_it_fits():
     assert all(len(c.content) <= 40 for c in chunks)
 
 
-def test_a_comment_that_cannot_merge_within_the_cap_stays_as_it_is():
+def test_a_comment_that_cannot_merge_within_the_cap_is_not_indexed():
     md = "word " * 7 + "\n<!-- c -->"  # 35 + 1 + 10 > 40, no neighbour to merge with
-    chunks = _block(md, max_chunk_size=40)
-    assert _contents(chunks) == ["word " * 6 + "word", "<!-- c -->"]
+    assert _contents(_block(md, max_chunk_size=40)) == ["word " * 6 + "word"]
+    md = "# H\n" + "A" * 1400 + "\n<!-- " + "c" * 190 + " -->"
+    chunks = _block(md)
+    assert _contents(chunks) == ["# H\n" + "A" * 1400]
+    assert all(clean_content_for_embedding(c.content) for c in chunks)
 
 
 def test_constructor_rejects_an_unknown_chunk_mode(monkeypatch, tmp_path):
@@ -492,6 +496,21 @@ def _fence_flags(lines: list[str]) -> list[bool]:
     return flags
 
 
+def _comment_only_lines(lines: list[str], s: int, e: int) -> set[int]:
+    """Indices in ``lines[s:e]`` whose every non-space character lies inside an HTML comment."""
+    text = "\n".join(lines[s:e])
+    inside = [False] * len(text)
+    for m in re.finditer(r"<!--.*?-->", text, re.DOTALL):
+        inside[m.start() : m.end()] = [True] * (m.end() - m.start())
+    out, pos = set(), 0
+    for i in range(s, e):
+        n = len(lines[i])
+        if all(inside[pos + j] or lines[i][j].isspace() for j in range(n)):
+            out.add(i)
+        pos += n + 1
+    return out
+
+
 def _is_item_or_row(line: str) -> bool:
     s = line.lstrip()
     return s.startswith("|") or s[:2] in ("- ", "* ", "+ ") or (s[:1].isdigit() and s[1:3] in (". ", ") "))
@@ -549,22 +568,17 @@ def _check_doc(doc: str, cap: int) -> None:
             )
             assert after_heading or after_label or beside_empty, (doc, c, k)
 
-    # (5) something is left to embed, unless merging the chunk into a neighbour would break the cap
-    for idx, c in enumerate(chunks):
-        if clean_content_for_embedding(c.content):
-            continue
-        for n in (chunks[idx - 1] if idx else None, chunks[idx + 1] if idx + 1 < len(chunks) else None):
-            if n is None or n.heading_level != c.heading_level or n.heading != c.heading:
-                continue
-            a, b = sorted([n, c], key=lambda x: x.start_line)
-            assert len("\n".join(lines[a.start_line - 1 : b.end_line]).strip()) > cap, (doc, c, n)
+    # (5) something is left to embed in every chunk
+    assert all(clean_content_for_embedding(c.content) for c in chunks), doc
 
-    # (2) each kept section is covered once, in order
+    # (2) each kept section is covered once, in order; the only lines that may be missing are
+    # lines made of HTML comments alone, which a piece with nothing to embed drops when it cannot merge
     for s, e in _sections(lines):
+        comment_only = _comment_only_lines(lines, s, e)
         expected: list = [
             ("OC", i, "".join(lines[i].split())) if len(lines[i]) >= cap else lines[i].strip()
             for i in range(s, e)
-            if lines[i].strip()
+            if lines[i].strip() and i not in comment_only
         ]
         actual: list = []
         for c in chunks:
@@ -579,7 +593,11 @@ def _check_doc(doc: str, cap: int) -> None:
                 else:
                     actual.append(("OC", i, piece))
             else:
-                actual.extend(ln.strip() for ln in c.content.split("\n") if ln.strip())
+                actual.extend(
+                    lines[i].strip()
+                    for i in range(c.start_line - 1, c.end_line)
+                    if lines[i].strip() and i not in comment_only
+                )
         assert actual == expected, (doc, s, e)
 
     # (7) CRLF text chunks exactly like LF text

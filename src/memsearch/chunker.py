@@ -388,7 +388,8 @@ def _chunk_blocks(
     A block is cut into pieces when it exceeds the cap; a piece left with no
     meaningful content (a comment cut loose from its text, or a heading with
     only a comment) is merged into a neighbouring piece of the section when
-    the merged text still fits the cap, and otherwise stays as it is.
+    the merged text still fits the cap; a block or piece with nothing to embed
+    that cannot be merged within the cap is not indexed.
 
     No line appears in two chunks; ``overlap_lines`` plays no part.
 
@@ -418,6 +419,8 @@ def _chunk_blocks(
 
         pieces = [piece for first, last in spans for piece in _piece_chunks(lines, first, last, max_size)]
         for content, start_idx, end_idx in _merge_empty_pieces(lines, pieces, max_size):
+            if not clean_content_for_embedding(content):
+                continue
             chunks.append(
                 Chunk(
                     content=content,
