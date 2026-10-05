@@ -175,6 +175,12 @@ def cli() -> None:
 @click.option(
     "--max-chunk-size", default=None, type=click.IntRange(min=1), help="Max chunk size in characters (must be >= 1)."
 )
+@click.option(
+    "--chunk-mode",
+    default=None,
+    type=click.Choice(["section", "block"]),
+    help="Chunking mode: one chunk per heading section (default) or per list item, paragraph or table.",
+)
 @click.option("--description", default=None, help="Collection description (written on creation only).")
 def index(
     paths: tuple[str, ...],
@@ -188,6 +194,7 @@ def index(
     milvus_token: str | None,
     force: bool,
     max_chunk_size: int | None,
+    chunk_mode: str | None,
     description: str | None,
 ) -> None:
     """Index markdown files from PATHS."""
@@ -208,7 +215,12 @@ def index(
     )
     ms = None
     try:
-        ms = MemSearch(list(paths), **_cfg_to_memsearch_kwargs(cfg), description=description or "")
+        ms = MemSearch(
+            list(paths),
+            **_cfg_to_memsearch_kwargs(cfg),
+            chunk_mode=chunk_mode or "section",
+            description=description or "",
+        )
         n = _run(ms.index(force=force))
         click.echo(f"Indexed {n} chunks.")
         rekeyed = ms.last_index_stats.get("rekeyed", 0)

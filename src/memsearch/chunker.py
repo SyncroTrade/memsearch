@@ -19,6 +19,13 @@ _MIN_MEANINGFUL_LEN = 2
 # past this length have no retrieval value anyway.
 _MAX_HEADING_BYTES = 512
 
+_CHUNK_MODES = ("section", "block")
+
+_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+# A fence opener: three or more backticks (no further backtick on the line,
+# which would make it inline code) or three or more tildes.
+_FENCE_OPEN_RE = re.compile(r"^\s*(?:(`{3,})[^`]*|(~{3,}).*)$")
+
 
 def _clamp_heading(text: str, max_bytes: int = _MAX_HEADING_BYTES) -> str:
     """Truncate *text* to at most *max_bytes* UTF-8 bytes, without splitting
@@ -123,14 +130,25 @@ def chunk_markdown(
     *,
     max_chunk_size: int = 1500,
     overlap_lines: int = 2,
+    mode: str = "section",
 ) -> list[Chunk]:
     """Split markdown *text* into chunks, breaking on headings.
 
     Chunks that exceed *max_chunk_size* characters are split further at
     paragraph boundaries.  A small *overlap_lines* context is carried
     forward to preserve continuity.
+
+    *mode* ``"section"`` (the default) emits one chunk per heading section.
+    ``"block"`` emits one chunk per list item, table or paragraph inside each
+    section; see :func:`_chunk_blocks`.  Any other value raises ``ValueError``.
     """
+    if mode not in _CHUNK_MODES:
+        raise ValueError(f"unknown chunk mode {mode!r}; expected one of {', '.join(_CHUNK_MODES)}")
     lines = text.split("\n")
+    if mode == "block":
+        # Section mode keeps the "\r" of a CRLF line inside chunk content;
+        # block mode drops it so CRLF text chunks exactly like LF text.
+        lines = [ln.removesuffix("\r") for ln in lines]
     # Find all heading positions
     heading_positions: list[tuple[int, int, str]] = []  # (line_idx, level, title)
     for i, line in enumerate(lines):
@@ -147,6 +165,9 @@ def chunk_markdown(
     for idx, (line_idx, level, title) in enumerate(heading_positions):
         next_start = heading_positions[idx + 1][0] if idx + 1 < len(heading_positions) else len(lines)
         sections.append((line_idx, next_start, title, level))
+
+    if mode == "block":
+        return _chunk_blocks(lines, sections, source=source, max_size=max_chunk_size)
 
     chunks: list[Chunk] = []
     for start, end, heading, level in sections:
@@ -179,6 +200,156 @@ def chunk_markdown(
                 )
             )
 
+    return chunks
+
+
+def _fence_marker(line: str) -> str:
+    """Return the fence run (``` or ~~~, any length >= 3) opening on *line*, or ""."""
+    m = _FENCE_OPEN_RE.match(line)
+    return (m.group(1) or m.group(2)) if m else ""
+
+
+def _fence_end(lines: list[str], i: int, end: int, marker: str) -> int:
+    """Return the index just past the fence opened on line *i* (or *end* if unclosed)."""
+    for j in range(i + 1, end):
+        s = lines[j].strip()
+        if len(s) >= len(marker) and s == marker[0] * len(s):
+            return j + 1
+    return end
+
+
+def _is_table_row(line: str) -> bool:
+    return line.lstrip().startswith("|")
+
+
+def _parse_blocks(lines: list[str], start: int, end: int) -> list[tuple[int, int, str]]:
+    """Group ``lines[start:end]`` into blocks: ``(first_idx, last_idx, kind)``.
+
+    Blank lines separate blocks and belong to none (except inside a fence).
+    Kinds: ``"list"`` (an item plus its continuation lines), ``"table"``
+    (consecutive lines starting with ``|``) and ``"paragraph"``.  A fenced
+    run is consumed whole wherever it starts, blank lines and list-looking
+    lines inside it included; an unclosed fence runs to *end*.
+    """
+    blocks: list[tuple[int, int, str]] = []
+    i = start
+    while i < end:
+        if not lines[i].strip():
+            i += 1
+            continue
+        if _is_table_row(lines[i]):
+            j = i + 1
+            while j < end and _is_table_row(lines[j]):
+                j += 1
+            blocks.append((i, j - 1, "table"))
+            i = j
+            continue
+        kind = "list" if _LIST_ITEM_RE.match(lines[i]) else "paragraph"
+        j = i
+        while j < end:
+            marker = _fence_marker(lines[j])
+            j = _fence_end(lines, j, end, marker) if marker else j + 1
+            if j >= end or not lines[j].strip() or _is_table_row(lines[j]) or _LIST_ITEM_RE.match(lines[j]):
+                break
+        last = j - 1
+        while not lines[last].strip():  # an unclosed fence can run into trailing blanks
+            last -= 1
+        blocks.append((i, last, kind))
+        i = j
+    return blocks
+
+
+def _piece_chunks(lines: list[str], first: int, last: int, max_size: int) -> list[tuple[str, int, int]]:
+    """Cut ``lines[first:last + 1]`` into ``(content, first_idx, last_idx)`` pieces.
+
+    The gate is section mode's own: a text of at most *max_size* characters
+    (after stripping) stays whole; a longer one is packed greedily into
+    pieces of whole lines, each at most *max_size* characters, no overlap.
+    A line of *max_size* characters or more is cut by ``_split_long_text``,
+    the routine section mode uses for such a line.
+    """
+
+    def _span(idxs: list[int]) -> tuple[str, int, int] | None:
+        content = "\n".join(lines[k] for k in idxs).strip()
+        if not content:
+            return None
+        non_blank = [k for k in idxs if lines[k].strip()]
+        return content, non_blank[0], non_blank[-1]
+
+    whole = _span(list(range(first, last + 1)))
+    if whole is None:
+        return []
+    if len(whole[0]) <= max_size:
+        return [whole]
+
+    pieces: list[tuple[str, int, int]] = []
+    current: list[int] = []
+
+    def _flush() -> None:
+        span = _span(current) if current else None
+        if span is not None:
+            pieces.append(span)
+        current.clear()
+
+    for i in range(first, last + 1):
+        line = lines[i]
+        if len(line) >= max_size:
+            _flush()
+            pieces.extend((part.strip(), i, i) for part in _split_long_text(line, max_size) if part.strip())
+        elif current and len("\n".join(lines[k] for k in [*current, i]).strip()) > max_size:
+            _flush()
+            current.append(i)
+        else:
+            current.append(i)
+    _flush()
+    return pieces
+
+
+def _chunk_blocks(
+    lines: list[str],
+    sections: list[tuple[int, int, str, int]],
+    *,
+    source: str,
+    max_size: int,
+) -> list[Chunk]:
+    """Emit one chunk per block inside each section (``mode="block"``).
+
+    Sections are the ones section mode finds, with the same skips. Inside a
+    section a one-line paragraph followed by a list item or a table is joined
+    to it (a label), and the heading line joins the first block. No line
+    appears in two chunks; ``overlap_lines`` plays no part.
+    """
+    chunks: list[Chunk] = []
+    for start, end, heading, level in sections:
+        section_text = "\n".join(lines[start:end]).strip()
+        if not section_text or not _has_meaningful_content(section_text):
+            continue
+
+        blocks = _parse_blocks(lines, start + 1 if level else start, end)
+        spans: list[tuple[int, int]] = []
+        k = 0
+        while k < len(blocks):
+            first, last, kind = blocks[k]
+            if kind == "paragraph" and first == last and k + 1 < len(blocks) and blocks[k + 1][2] != "paragraph":
+                last = blocks[k + 1][1]
+                k += 1
+            spans.append((first, last))
+            k += 1
+        if level and spans:
+            spans[0] = (start, spans[0][1])
+
+        for first, last in spans:
+            for content, start_idx, end_idx in _piece_chunks(lines, first, last, max_size):
+                chunks.append(
+                    Chunk(
+                        content=content,
+                        source=source,
+                        heading=heading,
+                        heading_level=level,
+                        start_line=start_idx + 1,
+                        end_line=end_idx + 1,
+                    )
+                )
     return chunks
 
 
