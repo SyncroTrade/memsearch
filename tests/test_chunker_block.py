@@ -167,6 +167,111 @@ def test_inline_triple_backticks_do_not_open_a_fence():
 
 
 # ---------------------------------------------------------------------------
+# Fence closers, line starts that are not blocks of their own
+# ---------------------------------------------------------------------------
+
+
+def test_a_shorter_fence_closer_does_not_close_and_a_longer_one_does():
+    chunks = _block("````\n- a\n\n- b\n```\n- c\n````\n- d\n")
+    assert _contents(chunks) == ["````\n- a\n\n- b\n```\n- c\n````", "- d"]
+    chunks = _block("```\n- a\n\n- b\n`````\n- c\n")
+    assert _contents(chunks) == ["```\n- a\n\n- b\n`````", "- c"]
+
+
+def test_tilde_fence_lines_inside_a_backtick_fence_are_content():
+    chunks = _block("```\n~~~\n- a\n\n- b\n```\n- c\n")
+    assert _contents(chunks) == ["```\n~~~\n- a\n\n- b\n```", "- c"]
+
+
+def test_a_heading_inside_a_fence_still_starts_a_section():
+    # Sections are found as section mode finds them, so the fence is cut there.
+    chunks = _block("# H\n```\nx\n# not\n\ny\n```\nz\n")
+    assert _contents(chunks) == ["# H\n```\nx", "# not\n\ny\n```\nz"]
+    assert _spans(chunks) == [(1, 3), (4, 8)]
+    assert [c.heading for c in chunks] == ["H", "not"]
+
+
+def test_emphasis_at_line_start_is_a_paragraph_not_a_list_item():
+    chunks = _block("*emph* word\n**bold** word\n")
+    assert _contents(chunks) == ["*emph* word\n**bold** word"]
+
+
+def test_rules_are_paragraphs():
+    chunks = _block("alpha beta\n\n---\n\n***\n\ngamma\n")
+    assert _contents(chunks) == ["alpha beta", "---", "***", "gamma"]
+
+
+def test_a_bare_list_marker_or_pipe_has_nothing_to_embed_and_joins_its_neighbour():
+    assert _contents(_block("alpha beta\n- \n- item\n")) == ["alpha beta\n- \n- item"]  # still a label for the item
+    assert _contents(_block("- one\n- \n- two\n")) == ["- one\n-", "- two"]
+    assert _contents(_block("alpha beta\n|\nmore\n")) == ["alpha beta\n|", "more"]
+
+
+def test_one_character_blocks_are_not_lost():
+    chunks = _block("# H\na\n\nb\n")
+    assert _contents(chunks) == ["# H\na\n\nb"] and _spans(chunks) == [(1, 4)]
+
+
+# ---------------------------------------------------------------------------
+# A block with nothing to embed is merged into its neighbour
+# ---------------------------------------------------------------------------
+
+
+def test_comment_only_block_after_text_merges_back():
+    chunks = _block("# H\ntext\n\n<!-- c -->\n")
+    assert _contents(chunks) == ["# H\ntext\n\n<!-- c -->"] and _spans(chunks) == [(1, 4)]
+
+
+def test_comment_only_block_before_text_merges_forward_under_the_heading():
+    chunks = _block("# H\n<!-- c -->\n\ntext\n")
+    assert _contents(chunks) == ["# H\n<!-- c -->\n\ntext"] and _spans(chunks) == [(1, 4)]
+    assert all(clean_content_for_embedding(c.content) != "# H" for c in chunks)
+
+
+def test_multi_line_comment_block_merges_back():
+    chunks = _block("# H\ntext here\n\n<!-- a\nb -->\n\nnext para\n")
+    assert _contents(chunks) == ["# H\ntext here\n\n<!-- a\nb -->", "next para"]
+
+
+def test_comment_only_block_between_two_list_items_merges_into_the_first():
+    chunks = _block("- one\n\n<!-- c -->\n\n- two\n")
+    assert _contents(chunks) == ["- one\n\n<!-- c -->", "- two"] and _spans(chunks) == [(1, 3), (5, 5)]
+
+
+def test_comment_only_section_emits_nothing():
+    assert _block("# H\n\n<!-- c -->\n") == []
+    assert _block("<!-- a -->\n\n<!-- b -->\n") == []
+
+
+def test_a_comment_before_a_label_leaves_the_label_with_its_list():
+    chunks = _block("# H\n<!-- c -->\n\nLabel:\n- one\n- two\n")
+    assert _contents(chunks) == ["# H\n<!-- c -->\n\nLabel:\n- one", "- two"]
+
+
+def test_a_comment_cut_loose_by_the_cap_merges_back_when_it_fits():
+    long_line = "alpha beta " * 6  # 66 characters
+    md = "```\nx\n```\n\n<!-- c -->\n" + long_line.strip()
+    chunks = _block(md, max_chunk_size=40)
+    assert _contents(chunks)[0] == "```\nx\n```\n\n<!-- c -->"
+    assert all(clean_content_for_embedding(c.content) for c in chunks)
+    assert all(len(c.content) <= 40 for c in chunks)
+
+
+def test_a_comment_that_cannot_merge_within_the_cap_stays_as_it_is():
+    md = "word " * 7 + "\n<!-- c -->"  # 35 + 1 + 10 > 40, no neighbour to merge with
+    chunks = _block(md, max_chunk_size=40)
+    assert _contents(chunks) == ["word " * 6 + "word", "<!-- c -->"]
+
+
+def test_constructor_rejects_an_unknown_chunk_mode(monkeypatch, tmp_path):
+    from memsearch import core as core_module
+
+    monkeypatch.setattr(core_module, "get_provider", lambda *_a, **_k: pytest.fail("built a provider"))
+    with pytest.raises(ValueError, match="bogus"):
+        core_module.MemSearch(milvus_uri=str(tmp_path / "x.db"), chunk_mode="bogus")
+
+
+# ---------------------------------------------------------------------------
 # Cap
 # ---------------------------------------------------------------------------
 
@@ -315,13 +420,34 @@ def _gen_doc(seed: int, cap: int) -> str:
             text += " " + _words(rng, 3, 6)
         out.append(text + rng.choice(["", ".", ". " + _words(rng)]))
 
+    def comment() -> None:
+        # a comment paragraph of its own: blank lines on both sides
+        out.append("")
+        if rng.random() < 0.5:
+            out.append(f"<!-- {_words(rng)} -->")
+        else:
+            out.extend(["<!--", *(_words(rng) for _ in range(rng.randint(1, 3))), "-->"])
+        out.append("")
+
     def label_then() -> None:
         out.append(_words(rng, 1, 3) + ":")
         if rng.random() < 0.5:
             out.append("")
         rng.choice([list_items, table])()
 
-    emitters = [list_items, list_items, table, paragraph, paragraph, fence, long_line, label_then, label_then]
+    emitters = [
+        list_items,
+        list_items,
+        table,
+        paragraph,
+        paragraph,
+        fence,
+        long_line,
+        label_then,
+        label_then,
+        comment,
+        comment,
+    ]
     for _ in range(rng.randint(1, 12)):
         if headed and rng.random() < 0.35:
             out.append("#" * rng.randint(1, 4) + " " + _words(rng, 1, 3))
@@ -371,6 +497,18 @@ def _is_item_or_row(line: str) -> bool:
     return s.startswith("|") or s[:2] in ("- ", "* ", "+ ") or (s[:1].isdigit() and s[1:3] in (". ", ") "))
 
 
+def _run(lines: list[str], k: int, step: int, lo: int, hi: int) -> str:
+    """The run of non-blank lines in ``lines[lo:hi]`` just before (step -1) or after (step 1) the blank line *k*."""
+    i = k
+    while lo <= i < hi and not lines[i].strip():
+        i += step
+    run = []
+    while lo <= i < hi and lines[i].strip():
+        run.append(lines[i])
+        i += step
+    return "\n".join(run[::-1] if step < 0 else run)
+
+
 def _check_doc(doc: str, cap: int) -> None:
     lines = doc.split("\n")
     chunks = chunk_markdown(doc, source="p.md", mode="block", max_chunk_size=cap)
@@ -383,8 +521,6 @@ def _check_doc(doc: str, cap: int) -> None:
     for c in chunks:
         # (3) the cap: never exceeded, because a long line is cut by the section-mode routine
         assert len(c.content) <= cap, (doc, c)
-        # (5) something is left to embed
-        assert clean_content_for_embedding(c.content), (doc, c)
         if is_piece(c):
             assert "".join(c.content.split()) in "".join(lines[c.start_line - 1].split())
             continue
@@ -392,18 +528,36 @@ def _check_doc(doc: str, cap: int) -> None:
         assert all(ln.strip() in stripped for ln in c.content.split("\n")), (doc, c)
         # (4) the line range reproduces the content
         assert c.content == "\n".join(lines[c.start_line - 1 : c.end_line]).strip(), (doc, c)
-        # (6) blank lines only after a heading, after a joined label, or inside a fence
+        # (6) blank lines only after a heading, after a joined label, inside a fence, or next to a merged empty block
         src = list(range(c.start_line - 1, c.end_line))
         for pos, k in enumerate(src):
             if lines[k].strip() or flags[k]:
                 continue
             before = [lines[j] for j in src[:pos] if lines[j].strip()]
             after = next((lines[j] for j in src[pos:] if lines[j].strip()), "")
-            heading_first = bool(before) and bool(_HEADING_RE.match(before[0]))
-            after_heading = heading_first and len(before) == 1
-            label_only = len(before) == (2 if heading_first else 1)
-            after_label = label_only and not _is_item_or_row(before[-1]) and _is_item_or_row(after)
-            assert after_heading or after_label, (doc, c, k)
+            after_heading = len(before) == 1 and bool(_HEADING_RE.match(before[0]))
+            prev_run = _run(lines, k, -1, c.start_line - 1, c.end_line).split("\n")
+            if _HEADING_RE.match(prev_run[0]):
+                prev_run = prev_run[1:]
+            after_label = len(prev_run) == 1 and not _is_item_or_row(prev_run[0]) and _is_item_or_row(after)
+            # a block with nothing to embed is merged into its neighbour
+            # (the run is read in the whole document and inside the chunk, since the cap can cut a comment)
+            beside_empty = any(
+                not _has_meaningful_content(_run(lines, k, step, lo, hi))
+                for step in (-1, 1)
+                for lo, hi in ((0, len(lines)), (c.start_line - 1, c.end_line))
+            )
+            assert after_heading or after_label or beside_empty, (doc, c, k)
+
+    # (5) something is left to embed, unless merging the chunk into a neighbour would break the cap
+    for idx, c in enumerate(chunks):
+        if clean_content_for_embedding(c.content):
+            continue
+        for n in (chunks[idx - 1] if idx else None, chunks[idx + 1] if idx + 1 < len(chunks) else None):
+            if n is None or n.heading_level != c.heading_level or n.heading != c.heading:
+                continue
+            a, b = sorted([n, c], key=lambda x: x.start_line)
+            assert len("\n".join(lines[a.start_line - 1 : b.end_line]).strip()) > cap, (doc, c, n)
 
     # (2) each kept section is covered once, in order
     for s, e in _sections(lines):
@@ -450,3 +604,4 @@ def test_generator_reaches_every_shape():
     assert any(len(ln) >= 80 for d in docs for ln in d.split("\n"))
     assert "\n    - " in joined and "\n| " in joined and "\n\n\n" in joined
     assert any(d.count("```") % 2 for d in docs)  # an unclosed fence
+    assert "\n<!--\n" in joined and "\n<!-- " in joined  # multi-line and one-line comments
