@@ -179,7 +179,9 @@ def cli() -> None:
     "--chunk-mode",
     default=None,
     type=click.Choice(["section", "block"]),
-    help="Chunking mode: one chunk per heading section (default) or per list item, paragraph or table.",
+    help="Chunking mode: one chunk per heading section (default) or per list item, paragraph or table. "
+    "Only index takes it; watch and compact re-index in section mode, so do not watch or compact a collection "
+    "indexed in block mode.",
 )
 @click.option("--description", default=None, help="Collection description (written on creation only).")
 def index(

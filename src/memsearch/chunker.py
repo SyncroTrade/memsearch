@@ -19,7 +19,7 @@ _MIN_MEANINGFUL_LEN = 2
 # past this length have no retrieval value anyway.
 _MAX_HEADING_BYTES = 512
 
-_CHUNK_MODES = ("section", "block")
+CHUNK_MODES = ("section", "block")
 
 _LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 # A fence opener: three or more backticks (no further backtick on the line,
@@ -141,9 +141,14 @@ def chunk_markdown(
     *mode* ``"section"`` (the default) emits one chunk per heading section.
     ``"block"`` emits one chunk per list item, table or paragraph inside each
     section; see :func:`_chunk_blocks`.  Any other value raises ``ValueError``.
+
+    Block mode strips the ``\\r`` of CRLF lines before it looks for headings, so
+    CRLF text chunks like LF text. Section mode keeps the ``\\r``, which means a
+    heading whose title is empty apart from ``\\r`` (``"### \\r"``), or text with
+    a lone ``\\r`` line ending, can be sectioned differently by the two modes.
     """
-    if mode not in _CHUNK_MODES:
-        raise ValueError(f"unknown chunk mode {mode!r}; expected one of {', '.join(_CHUNK_MODES)}")
+    if mode not in CHUNK_MODES:
+        raise ValueError(f"unknown chunk mode {mode!r}; expected one of {', '.join(CHUNK_MODES)}")
     lines = text.split("\n")
     if mode == "block":
         # Section mode keeps the "\r" of a CRLF line inside chunk content;
@@ -259,6 +264,60 @@ def _parse_blocks(lines: list[str], start: int, end: int) -> list[tuple[int, int
     return blocks
 
 
+def _merge_empty_blocks(lines: list[str], blocks: list[tuple[int, int, str]]) -> list[tuple[int, int, str]]:
+    """Merge each block with no meaningful content into its neighbour (see ``_chunk_blocks``).
+
+    Returns the blocks with a one-line paragraph retyped ``"label"``.
+    """
+    merged: list[tuple[int, int, str]] = []
+    pending: int | None = None  # first line of empty blocks waiting for the next block
+    for first, last, kind in blocks:
+        if kind == "paragraph" and first == last:
+            kind = "label"  # a one-line paragraph stays a label candidate whatever is merged into it
+        if not _has_meaningful_content("\n".join(lines[first : last + 1])):
+            if merged:
+                merged[-1] = (merged[-1][0], last, merged[-1][2])
+            elif pending is None:
+                pending = first
+            continue
+        if pending is not None:
+            first, pending = pending, None
+        merged.append((first, last, kind))
+    if pending is not None:  # no block has content of its own
+        merged.append((pending, blocks[-1][1], "paragraph"))
+    return merged
+
+
+def _merge_empty_pieces(
+    lines: list[str], pieces: list[tuple[str, int, int]], max_size: int
+) -> list[tuple[str, int, int]]:
+    """After the cap has cut blocks into pieces, merge a piece with no meaningful
+    content (a comment cut loose from its text) into the previous piece, or the
+    next one, whenever the merged text still fits *max_size*."""
+
+    def _join(a: tuple[str, int, int], b: tuple[str, int, int]) -> tuple[str, int, int]:
+        content = "\n".join(lines[a[1] : b[2] + 1]).strip()
+        return content, a[1], b[2]
+
+    todo = list(pieces)
+    out: list[tuple[str, int, int]] = []
+    i = 0
+    while i < len(todo):
+        piece = todo[i]
+        if not _has_meaningful_content(piece[0]):
+            if out and len(_join(out[-1], piece)[0]) <= max_size:
+                out[-1] = _join(out[-1], piece)
+                i += 1
+                continue
+            if i + 1 < len(todo) and len(_join(piece, todo[i + 1])[0]) <= max_size:
+                todo[i + 1] = _join(piece, todo[i + 1])
+                i += 1
+                continue
+        out.append(piece)
+        i += 1
+    return out
+
+
 def _piece_chunks(lines: list[str], first: int, last: int, max_size: int) -> list[tuple[str, int, int]]:
     """Cut ``lines[first:last + 1]`` into ``(content, first_idx, last_idx)`` pieces.
 
@@ -315,9 +374,28 @@ def _chunk_blocks(
     """Emit one chunk per block inside each section (``mode="block"``).
 
     Sections are the ones section mode finds, with the same skips. Inside a
-    section a one-line paragraph followed by a list item or a table is joined
-    to it (a label), and the heading line joins the first block. No line
-    appears in two chunks; ``overlap_lines`` plays no part.
+    section the steps run in this order:
+
+    1. A block with no meaningful content of its own (only HTML comments, or
+       under two characters) is merged into the previous block of the section,
+       or into the next one when it is the first, so no line is lost and no
+       chunk is left with nothing to embed. If no block has any, the whole
+       body is one block.
+    2. A one-line paragraph followed by a list item or a table is joined to it
+       (a label).
+    3. The heading line joins the first block.
+
+    A block is cut into pieces when it exceeds the cap; a piece left with no
+    meaningful content (a comment cut loose from its text, or a heading with
+    only a comment) is merged into a neighbouring piece of the section when
+    the merged text still fits the cap, and otherwise stays as it is.
+
+    No line appears in two chunks; ``overlap_lines`` plays no part.
+
+    Sections are found exactly as section mode finds them, so a heading-looking
+    line inside a fence still starts a new section and cuts the fence. A fence
+    must start its line (after indentation): one opened on a list item's own
+    line (``- ```) is not recognised.
     """
     chunks: list[Chunk] = []
     for start, end, heading, level in sections:
@@ -325,12 +403,12 @@ def _chunk_blocks(
         if not section_text or not _has_meaningful_content(section_text):
             continue
 
-        blocks = _parse_blocks(lines, start + 1 if level else start, end)
+        blocks = _merge_empty_blocks(lines, _parse_blocks(lines, start + 1 if level else start, end))
         spans: list[tuple[int, int]] = []
         k = 0
         while k < len(blocks):
             first, last, kind = blocks[k]
-            if kind == "paragraph" and first == last and k + 1 < len(blocks) and blocks[k + 1][2] != "paragraph":
+            if kind == "label" and k + 1 < len(blocks) and blocks[k + 1][2] in ("list", "table"):
                 last = blocks[k + 1][1]
                 k += 1
             spans.append((first, last))
@@ -338,18 +416,18 @@ def _chunk_blocks(
         if level and spans:
             spans[0] = (start, spans[0][1])
 
-        for first, last in spans:
-            for content, start_idx, end_idx in _piece_chunks(lines, first, last, max_size):
-                chunks.append(
-                    Chunk(
-                        content=content,
-                        source=source,
-                        heading=heading,
-                        heading_level=level,
-                        start_line=start_idx + 1,
-                        end_line=end_idx + 1,
-                    )
+        pieces = [piece for first, last in spans for piece in _piece_chunks(lines, first, last, max_size)]
+        for content, start_idx, end_idx in _merge_empty_pieces(lines, pieces, max_size):
+            chunks.append(
+                Chunk(
+                    content=content,
+                    source=source,
+                    heading=heading,
+                    heading_level=level,
+                    start_line=start_idx + 1,
+                    end_line=end_idx + 1,
                 )
+            )
     return chunks
 
 

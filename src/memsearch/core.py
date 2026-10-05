@@ -12,7 +12,14 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .watcher import FileWatcher
 
-from .chunker import Chunk, chunk_markdown, clean_content_for_embedding, compute_chunk_id, compute_content_hash
+from .chunker import (
+    CHUNK_MODES,
+    Chunk,
+    chunk_markdown,
+    clean_content_for_embedding,
+    compute_chunk_id,
+    compute_content_hash,
+)
 from .compact import compact_chunks
 from .embeddings import EmbeddingProvider, get_provider
 from .io import read_utf8_text_replace
@@ -63,6 +70,8 @@ class MemSearch:
         chunk_mode: str = "section",
         reranker_model: str = "",
     ) -> None:
+        if chunk_mode not in CHUNK_MODES:
+            raise ValueError(f"unknown chunk_mode {chunk_mode!r}; expected one of {', '.join(CHUNK_MODES)}")
         self._paths = [str(p) for p in (paths or [])]
         self._max_chunk_size = max_chunk_size
         self._overlap_lines = overlap_lines
