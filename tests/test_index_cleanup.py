@@ -76,6 +76,7 @@ def make_memsearch(
     ms._overlap_lines = 2
     ms._ignore_files = list(ignore_files or [])
     ms._exclude = list(exclude or [])
+    ms._chunk_mode = "section"
     ms._embedder = FakeEmbedder()
     store = InMemoryStore()
     ms._store = store

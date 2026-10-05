@@ -244,6 +244,12 @@ def cli() -> None:
     "--max-chunk-size", default=None, type=click.IntRange(min=1), help="Max chunk size in characters (must be >= 1)."
 )
 @click.option(
+    "--chunk-mode",
+    default=None,
+    type=click.Choice(["section", "block"]),
+    help="Chunking mode: one chunk per heading section (default) or per list item, paragraph or table.",
+)
+@click.option(
     "--description",
     default=None,
     help="Best-effort collection metadata written on creation; some backends may not return it.",
@@ -263,6 +269,7 @@ def index(
     exclude_patterns: tuple[str, ...],
     force: bool,
     max_chunk_size: int | None,
+    chunk_mode: str | None,
     description: str | None,
 ) -> None:
     """Index markdown files from PATHS."""
@@ -299,6 +306,7 @@ def index(
                 extra_ignore_files=ignore_files,
                 extra_exclude=exclude_patterns,
             ),
+            chunk_mode=chunk_mode or "section",
             description=description or "",
         )
         report = _run(ms.index_with_report(force=force))

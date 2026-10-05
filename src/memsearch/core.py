@@ -72,6 +72,7 @@ class MemSearch:
         overlap_lines: int = 2,
         ignore_files: list[str] | None = None,
         exclude: list[str] | None = None,
+        chunk_mode: str = "section",
         reranker_model: str = "",
     ) -> None:
         self._paths = [str(p) for p in (paths or [])]
@@ -79,6 +80,7 @@ class MemSearch:
         self._overlap_lines = overlap_lines
         self._ignore_files = list(ignore_files or [])
         self._exclude = list(exclude or [])
+        self._chunk_mode = chunk_mode
         self._embedder: EmbeddingProvider = get_provider(
             embedding_provider,
             model=embedding_model,
@@ -178,6 +180,7 @@ class MemSearch:
             source=source,
             max_chunk_size=self._max_chunk_size,
             overlap_lines=self._overlap_lines,
+            mode=self._chunk_mode,
         )
         model = self._embedder.model_name
 

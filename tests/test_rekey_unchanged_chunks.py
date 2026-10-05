@@ -108,6 +108,9 @@ def make_memsearch(paths: list[str | Path], embedder: CountingEmbedder) -> tuple
     ms._paths = [str(p) for p in paths]
     ms._max_chunk_size = 1500
     ms._overlap_lines = 2
+    ms._ignore_files = []
+    ms._exclude = []
+    ms._chunk_mode = "section"
     ms._embedder = embedder
     store = InMemoryStore()
     ms._store = store
