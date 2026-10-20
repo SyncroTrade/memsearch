@@ -8,6 +8,7 @@ memory search. Default model is a pre-quantized int8 bge-m3 ONNX export.
 from __future__ import annotations
 
 import asyncio
+import os
 from functools import partial
 
 
@@ -50,7 +51,18 @@ class OnnxEmbedding:
         self._tokenizer.enable_padding(pad_id=1, pad_token="<pad>")
         self._tokenizer.enable_truncation(max_length=8192)
 
-        self._session = ort.InferenceSession(model_path)
+        # Cap the intra-op thread pool.  Environment variables such as
+        # OMP_NUM_THREADS do not bind on onnxruntime, so the width has to be set
+        # through SessionOptions.  Unset / empty / non-int / <= 0 keeps the
+        # onnxruntime default (all cores).
+        so = ort.SessionOptions()
+        try:
+            threads = int(os.environ.get("MEMSEARCH_ONNX_THREADS", ""))
+        except ValueError:
+            threads = 0
+        if threads > 0:
+            so.intra_op_num_threads = threads
+        self._session = ort.InferenceSession(model_path, sess_options=so)
         self._output_names = [o.name for o in self._session.get_outputs()]
         self._has_dense_vecs = "dense_vecs" in self._output_names
         self._model = model
